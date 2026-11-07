@@ -1,0 +1,126 @@
+# Don't Escape: 4 Days to Survive — PS Vita port
+
+An unofficial port of the PC game *Don't Escape: 4 Days to Survive* to the PS Vita.
+
+The game's C# scripts were translated to C++, and they run on a small engine of their own (`engine/`) that does the
+parts of Unity the game uses. On the Vita it draws with vitaGL on a separate render thread. Nearly every area runs at
+60 fps; an area that can't hold 60 locks to a steady 30.
+
+> This is a fan project. It is not affiliated with or endorsed by scriptwelder or Armor Games Studios.
+> *Don't Escape: 4 Days to Survive* and all of its art, sound, music and text belong to their owners.
+
+## Installing
+
+You need a hacked Vita with VitaShell, plus `libshacccg.suprx` (the Vita's shader compiler). If no other game has
+needed it yet, extract it once with ShaRKF00D.
+
+1. Download `DontEscape.vpk` from [Releases](../../releases). It's 116 MB and has the game files inside.
+2. Copy it anywhere on the memory card. With FTP, use one connection at a time, since several at once can stall the
+   Vita. A card reader is the most reliable way.
+3. In VitaShell, open the VPK, press **X** and choose **Install**. Unpacking takes a few minutes.
+4. Start **Don't Escape** from the home screen. The first launch checks the game files (a grey bar, about 10–20 s).
+   After a clean check it doesn't run again.
+
+- Saves and settings: `ux0:data/DontEscape/save/` (kept across reinstalls and updates)
+- Log of the last run: `ux0:data/DontEscape/save/log.txt`
+- If the screen ever draws wrong, create an empty file named `single_thread.txt` in `ux0:data/DontEscape/`. The game
+  then draws on its main thread.
+
+## Controls
+
+| Input | Action |
+|---|---|
+| Touch | tap = click at that spot |
+| Right stick (or left, see below) | move the cursor |
+| D-pad | nudge the cursor |
+| X | click |
+| O | look / examine |
+| Triangle | inventory |
+| Square | journal |
+| Start | menu |
+| Select | Space |
+
+**Options → Cursor** switches the cursor to the left stick (for left-handed play), and the setting is saved.
+
+## Building
+
+This repo holds the port: the engine, the translated scripts and the tools. It doesn't hold the game's files. To
+build it, export your own copy of the PC game with AssetRipper 2.0 into `export/ExportedProject`, then:
+
+- **Game data:** `node tools/convert/convert.js export/ExportedProject data`, then `node tools/checksums.js data`.
+- **LiveArea art:** `node tools/livearea/build_art.js tools/livearea/art` (made from the game's own images; without
+  it the build uses plain placeholder art).
+- **Vita:** `cd engine && VITASDK=/path/to/vitasdk ./build_vita.sh`. It stages the app in `engine/out/vita/vpk/`
+  (`NOVPK=1` for the eboot only, `JOBS=n` for parallel jobs).
+- **Release VPK with the data inside:**
+  `node tools/pack_vpk.js DontEscape.vpk engine/out/vita/vpk data=data`, then check it with
+  `node tools/verify_vpk.js DontEscape.vpk engine/out/vita/vpk data=data`.
+- **PC test runner (Windows, MSVC Build Tools):** `engine\build_pc.bat` builds `engine/out/pc/detest.exe`.
+- **Scripts:** after adding or changing a translated class, regenerate the declarations with
+  `node tools/gen/gen.js <Scripts/Assembly-CSharp> engine/src/game --chunks-only`.
+
+The game reads its data from the installed app (`app0:data`). If the app has none, it falls back to a separate copy
+at `ux0:data/DontEscape/data`.
+
+## Testing on PC
+
+`engine/out/pc/detest.exe <data> <saveDir> <scene> <frames> <out.png>` runs the game headless at a fixed 1/60 s
+step with a fixed random seed, so a run is repeatable. Options:
+
+- `--goto scene@frame`: jump to a scene
+- `--click x,y@frame` / `--rclick x,y@frame`: click at a screen spot (top-left origin)
+- `--key code@frame`: press a key
+- `--shot frame:path`: save a screenshot
+- `--mem N`: print memory use every N frames
+- `--dump`: list cameras and sprites
+- `--wav path`: write the mixed audio
+
+The regression check used for every engine change:
+
+```bash
+bash tools/smoke.sh                               # every scene: script errors + screenshots
+node tools/shotdiff.js <baseline> run/smoke       # compares the screenshots with an earlier run
+```
+
+## Project layout
+
+```
+engine/
+  build_pc.bat            PC test runner (MSVC Build Tools) -> out/pc/detest.exe
+  build_vita.sh           Vita eboot + VPK -> out/vita/
+  src/cs.h, cs.cpp        C#-like base types: String, List, Array, P<T> (ref-counted), exceptions, log
+  src/unity.h, engine.cpp the Unity API the game uses: objects, transforms, scenes, sprites, animators,
+                          physics queries, audio state, resources, frame loop, software rasterizer
+  src/audio.cpp           mixer (stb_vorbis / dr_mp3); sound files load on a background thread
+  src/main_vita.cpp       Vita entry: vitaGL renderer + render thread, input, frame pacing, logs, data check
+  src/main_pc.cpp         PC test runner (headless, writes screenshots)
+  src/game/h/             class declarations, generated by tools/gen/gen.js
+  src/game/cpp/           the translated scripts, one file per class (see docs/TRANSLATING.md)
+  src/third_party/        stb_vorbis, dr_mp3
+tools/
+  convert/                exported Unity project -> data/ (textures, sprites, audio, anims, scenes, prefabs)
+  gen/                    C# declarations -> headers, registry, build chunks
+  checksums.js            data/checksums.txt for the first-launch data check
+  smoke.sh, shotdiff.js   regression check
+  livearea/               LiveArea art
+  pack_vpk.js, verify_vpk.js   release VPK with the data inside, and its check
+  coredump/core.js        reads a Vita crash dump (psp2dmp)
+```
+
+## Notes for anyone working on it
+
+- **No `std::mutex` on the Vita build.** pthread is only weakly linked, so `std::mutex` does nothing, and
+  `shared_ptr` reference counts aren't updated atomically. Cross-thread code uses `sceKernelLwMutex`.
+- **Memory.** Objects hold each other with reference counts, so a group that points at itself is only freed once
+  those links are cut. A scene unload cuts them, and objects removed with `Destroy()` during play get the same at the
+  next scene load. The log's `[heap]` line (every 5 s) shows heap use.
+- **Animator blends.** When a state moves on by itself (exit time), Unity keeps playing the old state for the blend
+  and still fires its events. The engine does the same, and some puzzles depend on it.
+- **Game materials.** The game's two custom materials, MultiplyMaterial (dusk/dawn tints) and OverlayMaterial
+  (additive light), survive only as names. The Vita renderer premultiplies alpha and switches blend mode per draw.
+- **Debugging a Vita crash:** run `node tools/coredump/core.js <psp2dmp>`, take the crashed thread's PC/LR, subtract
+  the module's load offset, then run `arm-vita-eabi-addr2line -f -C -e engine/out/vita/DontEscape.elf <addr>`.
+
+## Third-party code
+
+See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

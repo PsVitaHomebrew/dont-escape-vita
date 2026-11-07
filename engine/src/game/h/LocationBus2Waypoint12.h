@@ -1,0 +1,21 @@
+// Generated from LocationBus2Waypoint12.cs by tools/gen/gen.js - do not edit. Method bodies: src/game/cpp/LocationBus2Waypoint12.cpp
+#pragma once
+#include "../game_types.h"
+#include "ObjectActionController.h"
+
+class LocationBus2Waypoint12 : public ObjectActionController {
+public:
+  // ---- constructors
+  LocationBus2Waypoint12() {}
+  // ---- methods
+  void Start();
+  void clickAction() override;
+  void updateState() override;
+  void clickAction2() override;
+  void clickAction0() override;
+  // ---- generated
+  void _load(FieldReader& r) override;
+  void _clearRefs() override;
+  const ClassInfo* _getClassInfo() const override;
+  void _saveSerialized(JsonWriter& w) override;
+};

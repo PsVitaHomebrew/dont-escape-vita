@@ -1,0 +1,117 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Scene Preview</title>
+<style>
+  :root { --bg: #f4f4f4; --fg: #222; --panel: #fff; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #1b1b1b; --fg: #eee; --panel: #262626; } }
+  :root[data-theme="dark"] { --bg: #1b1b1b; --fg: #eee; --panel: #262626; }
+  body { margin: 0; padding: 12px 16px; background: var(--bg); color: var(--fg); font: 13px system-ui, sans-serif; }
+  canvas { image-rendering: pixelated; background: #000; display: block; max-width: 100%; }
+  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  select, button { font: inherit; }
+  #info { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px; background: var(--panel); padding: 8px; margin-top: 8px; max-height: 240px; overflow: auto; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <select id="scene"></select>
+  <button id="prev">◀</button><button id="next">▶</button>
+  <label><input type="checkbox" id="inactive"> show inactive</label>
+  <label><input type="checkbox" id="boxes"> colliders</label>
+</div>
+<canvas id="c" width="960" height="540"></canvas>
+<div id="info"></div>
+<script>
+const D = '/data/';
+const W = 240, H = 135, S = 4;
+let man, sprites, textures; const img = new Map();
+const cv = document.getElementById('c'), cx = cv.getContext('2d');
+cx.imageSmoothingEnabled = false;
+const sel = document.getElementById('scene');
+const J = u => fetch(u).then(r => r.json());
+function texImg(i) {
+  if (img.has(i)) return img.get(i);
+  const p = new Promise(res => { const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null); im.src = '/' + textures[i].src; });
+  img.set(i, p); return p;
+}
+async function show(idx) {
+  const sc = await J(D + 'scenes/' + idx + '.json');
+  const byId = new Map(sc.objs.map(o => [o.id, o]));
+  const showInactive = document.getElementById('inactive').checked;
+  // world transforms (position + scale only; the game uses no rotation)
+  const world = new Map();
+  const wt = o => {
+    if (world.has(o.id)) return world.get(o.id);
+    let r;
+    if (o.parent && byId.has(o.parent)) {
+      const p = wt(byId.get(o.parent));
+      r = { x: p.x + p.sx * o.p[0], y: p.y + p.sy * o.p[1], z: p.z + p.sz * o.p[2], sx: p.sx * o.s[0], sy: p.sy * o.s[1], sz: p.sz * o.s[2], act: p.act && !!o.a };
+    } else r = { x: o.p[0], y: o.p[1], z: o.p[2], sx: o.s[0], sy: o.s[1], sz: o.s[2], act: !!o.a };
+    world.set(o.id, r); return r;
+  };
+  sc.objs.forEach(wt);
+  const cams = [];
+  for (const o of sc.objs) for (const c of o.c) if (c.k === 'camera' && c.en && (wt(o).act)) cams.push({ o, c, w: wt(o) });
+  cams.sort((a, b) => a.c.depth - b.c.depth);
+  const slOrder = new Map(man.sortingLayers.map((s, i) => [s.id, i]));
+  const items = [];
+  for (const o of sc.objs) {
+    const w = wt(o);
+    if (!w.act && !showInactive) continue;
+    for (const c of o.c) if (c.k === 'sr' && (c.en || showInactive) && c.sp && c.sp.a !== undefined) items.push({ o, c, w });
+  }
+  // resolve sprite: c.sp.a is a global asset index; convert via manifest table
+  cx.fillStyle = '#000'; cx.fillRect(0, 0, cv.width, cv.height);
+  let drawn = 0; const lines = [];
+  for (const cam of cams.length ? cams : [{ c: { os: 0.625, mask: -1, clear: 2, bg: [0, 0, 0, 1] }, w: { x: 0, y: 0 } }]) {
+    const ppuView = H / (2 * cam.c.os);
+    const left = cam.w.x - (W / 2) / ppuView, top = cam.w.y + (H / 2) / ppuView;
+    if (cam.c.clear === 1 || cam.c.clear === 2) { const b = cam.c.bg; cx.fillStyle = `rgb(${b[0] * 255},${b[1] * 255},${b[2] * 255})`; cx.fillRect(0, 0, cv.width, cv.height); }
+    const list = items.filter(it => (cam.c.mask >>> 0) & (1 << it.o.l));
+    list.sort((a, b) => (slOrder.get(a.c.sl) || 0) - (slOrder.get(b.c.sl) || 0) || a.c.so - b.c.so || b.w.z - a.w.z);
+    for (const it of list) {
+      const si = spriteIndexOf(it.c.sp.a); if (si < 0) continue;
+      const sp = sprites[si]; const im = await texImg(sp.t); if (!im) continue;
+      const tw = textures[sp.t].w, th = textures[sp.t].h;
+      const [rx, ry, rw, rh] = sp.r;
+      const wwid = rw / sp.u * it.w.sx, whei = rh / sp.u * it.w.sy;
+      const px = (it.w.x - left) * ppuView, py = (top - it.w.y) * ppuView;
+      cx.save();
+      cx.globalAlpha = it.c.col[3];
+      cx.translate(px * S, py * S);
+      cx.scale((it.c.fx ? -1 : 1) * Math.sign(wwid || 1), (it.c.fy ? -1 : 1) * Math.sign(whei || 1));
+      const dw = Math.abs(wwid) * ppuView * S, dh = Math.abs(whei) * ppuView * S;
+      cx.drawImage(im, rx, th - ry - rh, rw, rh, -sp.p[0] * dw, -(1 - sp.p[1]) * dh, dw, dh);
+      cx.restore(); drawn++;
+    }
+    if (document.getElementById('boxes').checked) {
+      cx.strokeStyle = '#0f0';
+      for (const o of sc.objs) { const w = wt(o); if (!w.act) continue; for (const c of o.c) if (c.k === 'box' && c.en) {
+        const x = (w.x + c.off[0] * w.sx - c.sz[0] * Math.abs(w.sx) / 2 - left) * ppuView * S, y = (top - (w.y + c.off[1] * w.sy + c.sz[1] * Math.abs(w.sy) / 2)) * ppuView * S;
+        cx.strokeRect(x, y, c.sz[0] * Math.abs(w.sx) * ppuView * S, c.sz[1] * Math.abs(w.sy) * ppuView * S); } }
+    }
+    lines.push(`camera ${cam.o ? cam.o.n : '(none)'} depth ${cam.c.depth} size ${cam.c.os} pos ${cam.w.x.toFixed(3)},${cam.w.y.toFixed(3)} mask ${(cam.c.mask >>> 0).toString(2)} -> ${list.length} sprites`);
+  }
+  const scripts = {}; for (const o of sc.objs) for (const c of o.c) if (c.k === 'mb') scripts[c.cls] = (scripts[c.cls] || 0) + 1;
+  document.getElementById('info').textContent = `#${idx} ${sc.name}: ${sc.objs.length} objects, ${drawn} sprites drawn\n` + lines.join('\n') + '\nscripts: ' + Object.entries(scripts).sort((a, b) => b[1] - a[1]).map(([k, v]) => k + '×' + v).join(', ');
+  window.__done = idx;
+}
+let spriteOf;
+function spriteIndexOf(a) { return spriteOf.has(a) ? spriteOf.get(a) : -1; }
+(async () => {
+  [man, sprites, textures] = await Promise.all([J(D + 'manifest.json'), J(D + 'sprites.json'), J(D + 'textures.json')]);
+  const assetKinds = await J(D + 'assetindex.json');
+  spriteOf = new Map(assetKinds.sprite.map((a, i) => [a, i]));
+  man.scenes.forEach((n, i) => { const o = document.createElement('option'); o.value = i; o.textContent = i + ' ' + n; sel.appendChild(o); });
+  const q = +(new URLSearchParams(location.search).get('s') || 3);
+  sel.value = q; sel.onchange = () => show(+sel.value);
+  document.getElementById('prev').onclick = () => { sel.value = Math.max(0, +sel.value - 1); show(+sel.value); };
+  document.getElementById('next').onclick = () => { sel.value = Math.min(man.scenes.length - 1, +sel.value + 1); show(+sel.value); };
+  document.getElementById('inactive').onchange = document.getElementById('boxes').onchange = () => show(+sel.value);
+  show(q);
+})();
+</script>
+</body>
+</html>
